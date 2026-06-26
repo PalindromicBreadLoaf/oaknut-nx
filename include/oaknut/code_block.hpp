@@ -17,6 +17,8 @@
 #    include <pthread.h>
 #    include <sys/mman.h>
 #    include <unistd.h>
+#elif defined(__SWITCH__)
+#    include <malloc.h>
 #else
 #    include <sys/mman.h>
 #endif
@@ -40,6 +42,11 @@ public:
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_MPROTECT(PROT_READ | PROT_WRITE | PROT_EXEC), MAP_ANON | MAP_PRIVATE, -1, 0);
 #elif defined(__OpenBSD__)
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+#elif defined(__SWITCH__)
+        // Horizon has no mmap
+        // TODO: Implement all the libnx JIT stuff
+        // This will NOT work as is
+        m_memory = (std::uint32_t*)memalign(0x1000, size);
 #else
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
 #endif
@@ -55,6 +62,8 @@ public:
 
 #if defined(_WIN32)
         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
+#elif defined(__SWITCH__)
+        free(m_memory);
 #else
         munmap(m_memory, m_size);
 #endif
