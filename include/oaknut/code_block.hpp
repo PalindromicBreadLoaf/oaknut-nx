@@ -18,7 +18,10 @@
 #    include <sys/mman.h>
 #    include <unistd.h>
 #elif defined(__SWITCH__)
-#    include <malloc.h>
+#    include <cstdio>
+#    include <switch.h>
+// libnx defines a BIT(n) macro that collides with this BIT SIMD instruction.
+#    undef BIT
 #else
 #    include <sys/mman.h>
 #endif
@@ -43,10 +46,23 @@ public:
 #elif defined(__OpenBSD__)
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
 #elif defined(__SWITCH__)
-        // Horizon has no mmap
-        // TODO: Implement all the libnx JIT stuff
-        // This will NOT work as is
-        m_memory = (std::uint32_t*)memalign(0x1000, size);
+        // Horizon enforces W^X. Libnx's Jit hands back two aliases of the same physical pages so we can have both.
+        if (R_FAILED(jitCreate(&m_jit, size))) {
+            // Most likely opened in applet mode.
+            std::fprintf(stderr,
+                         "oaknut: jitCreate(%zu) failed. The process likely lacks the JIT "
+                         "capability. Make sure you aren't running in Applet Mode.\n",
+                         size);
+            m_memory = nullptr;
+        } else if (R_FAILED(jitTransitionToExecutable(&m_jit))) {
+            std::fprintf(stderr, "oaknut: jitTransitionToExecutable failed.\n");
+            jitClose(&m_jit);
+            m_memory = nullptr;
+        } else {
+            m_rw = (std::uint32_t*)jitGetRwAddr(&m_jit);
+            m_rx = (std::uint32_t*)jitGetRxAddr(&m_jit);
+            m_memory = m_rx;
+        }
 #else
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
 #endif
@@ -63,7 +79,7 @@ public:
 #if defined(_WIN32)
         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
 #elif defined(__SWITCH__)
-        free(m_memory);
+        jitClose(&m_jit);
 #else
         munmap(m_memory, m_size);
 #endif
@@ -77,6 +93,26 @@ public:
     std::uint32_t* ptr() const
     {
         return m_memory;
+    }
+
+    // Base of the alias generated code is written through. Equals ptr() except on platforms with a separate RW/RX dual mapping.
+    std::uint32_t* wptr() const
+    {
+#if defined(__SWITCH__)
+        return m_rw;
+#else
+        return m_memory;
+#endif
+    }
+
+    // Base of the alias the CPU executes from.
+    std::uint32_t* xptr() const
+    {
+#if defined(__SWITCH__)
+        return m_rx;
+#else
+        return m_memory;
+#endif
     }
 
     void protect()
@@ -99,7 +135,13 @@ public:
 
     void invalidate(std::uint32_t* mem, std::size_t size)
     {
-#if defined(__APPLE__)
+#if defined(__SWITCH__)
+        // mem points into the RX alias.
+        char* const rx = reinterpret_cast<char*>(mem);
+        char* const rw = reinterpret_cast<char*>(m_rw) + (rx - reinterpret_cast<char*>(m_rx));
+        __builtin___clear_cache(rw, rw + size);
+        __builtin___clear_cache(rx, rx + size);
+#elif defined(__APPLE__)
         sys_icache_invalidate(mem, size);
 #elif defined(_WIN32)
         FlushInstructionCache(GetCurrentProcess(), mem, size);
@@ -145,6 +187,11 @@ public:
     }
 
 protected:
+#if defined(__SWITCH__)
+    Jit m_jit{};
+    std::uint32_t* m_rw = nullptr;
+    std::uint32_t* m_rx = nullptr;
+#endif
     std::uint32_t* m_memory;
     std::size_t m_size = 0;
 };
