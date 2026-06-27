@@ -18,10 +18,8 @@
 #    include <sys/mman.h>
 #    include <unistd.h>
 #elif defined(__SWITCH__)
-#    include <cstdio>
-#    include <switch.h>
-// libnx defines a BIT(n) macro that collides with this BIT SIMD instruction.
-#    undef BIT
+// Prevent redefinition of u128
+#    include <oaknut/horizon_jit.h>
 #else
 #    include <sys/mman.h>
 #endif
@@ -46,21 +44,12 @@ public:
 #elif defined(__OpenBSD__)
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
 #elif defined(__SWITCH__)
-        // Horizon enforces W^X. Libnx's Jit hands back two aliases of the same physical pages so we can have both.
-        if (R_FAILED(jitCreate(&m_jit, size))) {
-            // Most likely opened in applet mode.
-            std::fprintf(stderr,
-                         "oaknut: jitCreate(%zu) failed. The process likely lacks the JIT "
-                         "capability. Make sure you aren't running in Applet Mode.\n",
-                         size);
-            m_memory = nullptr;
-        } else if (R_FAILED(jitTransitionToExecutable(&m_jit))) {
-            std::fprintf(stderr, "oaknut: jitTransitionToExecutable failed.\n");
-            jitClose(&m_jit);
-            m_memory = nullptr;
-        } else {
-            m_rw = (std::uint32_t*)jitGetRwAddr(&m_jit);
-            m_rx = (std::uint32_t*)jitGetRxAddr(&m_jit);
+        // Horizon enforces W^X. To get around this libnx provides two aliases to the same memery block.
+        {
+            const auto alloc = horizon::JitAllocate(size);
+            m_jit = alloc.handle;
+            m_rw = (std::uint32_t*)alloc.rw;
+            m_rx = (std::uint32_t*)alloc.rx;
             m_memory = m_rx;
         }
 #else
@@ -79,7 +68,7 @@ public:
 #if defined(_WIN32)
         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
 #elif defined(__SWITCH__)
-        jitClose(&m_jit);
+        horizon::JitFree(m_jit);
 #else
         munmap(m_memory, m_size);
 #endif
@@ -188,7 +177,7 @@ public:
 
 protected:
 #if defined(__SWITCH__)
-    Jit m_jit{};
+    void* m_jit = nullptr;  // owning libnx Jit*
     std::uint32_t* m_rw = nullptr;
     std::uint32_t* m_rx = nullptr;
 #endif
